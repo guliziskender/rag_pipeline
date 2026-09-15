@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Package/build output
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test, coverage, and type-checker output
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.pyre/
+.ruff_cache/
+
+# Local RAG data and model caches
+chroma_db/
+*.sqlite
+*.sqlite3
+*.db
+.cache/
+.huggingface/
+
+# Uploaded or generated files
+uploads/
+data/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS and editor files
+.DS_Store
+.vscode/
+.idea/
