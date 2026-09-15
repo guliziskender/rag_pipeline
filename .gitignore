@@ -5,6 +5,10 @@ __pycache__/
 *.so
 .Python
 
+# Local agent instructions and skills
+.agents/
+.claude/
+
 # Virtual environments
 .venv/
 .venv-*/
