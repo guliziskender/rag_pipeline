@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import tempfile
 from typing import List, Optional
@@ -21,6 +22,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 app = FastAPI()
+logger = logging.getLogger("rag_pipeline")
 
 PERSIST_DIRECTORY = os.environ.get("CHROMA_PERSIST_DIR", "./chroma_db")
 
@@ -52,7 +54,14 @@ async def ingest_document(file: UploadFile = File(...)):
         tmp_path = tmp.name
 
     try:
-        pages = PyPDFLoader(tmp_path).load()
+        try:
+            pages = PyPDFLoader(tmp_path).load()
+        except Exception as exc:
+            logger.exception("Failed to parse PDF %s", file.filename)
+            raise HTTPException(
+                status_code=422,
+                detail=f"Could not read '{file.filename}' as a PDF: {exc}",
+            ) from exc
     finally:
         os.remove(tmp_path)
 
@@ -63,7 +72,14 @@ async def ingest_document(file: UploadFile = File(...)):
     if not chunks:
         raise HTTPException(status_code=422, detail="No extractable text found in the PDF")
 
-    vector_store.add_documents(chunks)
+    try:
+        vector_store.add_documents(chunks)
+    except Exception as exc:
+        logger.exception("Failed to index chunks for %s", file.filename)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to index '{file.filename}': {exc}",
+        ) from exc
 
     return {
         "filename": file.filename,
