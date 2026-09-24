@@ -1,4 +1,6 @@
 import json
+from urllib.parse import quote
+
 import requests
 import streamlit as st
 
@@ -28,6 +30,34 @@ with st.sidebar:
                     st.error(f"Failed to index file: {response.text}")
             except Exception as e:
                 st.error(f"Backend connection error: {e}")
+
+    st.divider()
+    st.header("🗂️ Indexed Documents")
+
+    try:
+        docs_response = requests.get(f"{API_URL}/documents")
+        documents = docs_response.json().get("documents", []) if docs_response.status_code == 200 else []
+    except Exception as e:
+        documents = []
+        st.error(f"Could not load indexed documents: {e}")
+
+    if not documents:
+        st.caption("No documents indexed yet.")
+    else:
+        for doc in documents:
+            col1, col2 = st.columns([4, 1])
+            col1.markdown(f"**{doc['filename']}**  \n{doc['chunks']} chunks")
+            if col2.button("🗑️", key=f"delete_{doc['filename']}", help=f"Remove {doc['filename']}"):
+                with st.spinner(f"Removing {doc['filename']}..."):
+                    try:
+                        del_response = requests.delete(f"{API_URL}/documents/{quote(doc['filename'], safe='')}")
+                        if del_response.status_code == 200:
+                            st.success(f"Removed **{doc['filename']}**.")
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to remove file: {del_response.text}")
+                    except Exception as e:
+                        st.error(f"Backend connection error: {e}")
 
 # Session State: Maintain Conversation History
 if "messages" not in st.session_state:

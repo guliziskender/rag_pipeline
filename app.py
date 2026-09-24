@@ -4,6 +4,7 @@ import os
 import tempfile
 from typing import List, Optional
 from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -55,7 +56,7 @@ async def ingest_document(file: UploadFile = File(...)):
 
     try:
         try:
-            pages = PyPDFLoader(tmp_path).load()
+            pages = await run_in_threadpool(PyPDFLoader(tmp_path).load)
         except Exception as exc:
             logger.exception("Failed to parse PDF %s", file.filename)
             raise HTTPException(
@@ -68,12 +69,12 @@ async def ingest_document(file: UploadFile = File(...)):
     for page in pages:
         page.metadata["source"] = file.filename
 
-    chunks = text_splitter.split_documents(pages)
+    chunks = await run_in_threadpool(text_splitter.split_documents, pages)
     if not chunks:
         raise HTTPException(status_code=422, detail="No extractable text found in the PDF")
 
     try:
-        vector_store.add_documents(chunks)
+        await run_in_threadpool(vector_store.add_documents, chunks)
     except Exception as exc:
         logger.exception("Failed to index chunks for %s", file.filename)
         raise HTTPException(
@@ -85,6 +86,38 @@ async def ingest_document(file: UploadFile = File(...)):
         "filename": file.filename,
         "chunks": len(chunks),
         "detail": "PDF indexed successfully.",
+    }
+
+
+@app.get("/documents", summary="List indexed documents")
+async def list_documents():
+    records = await run_in_threadpool(vector_store.get, include=["metadatas"])
+
+    chunk_counts: dict[str, int] = {}
+    for metadata in records["metadatas"]:
+        source = metadata.get("source", "Unknown")
+        chunk_counts[source] = chunk_counts.get(source, 0) + 1
+
+    return {
+        "documents": [
+            {"filename": source, "chunks": count}
+            for source, count in sorted(chunk_counts.items())
+        ]
+    }
+
+
+@app.delete("/documents/{filename}", summary="Remove an indexed document")
+async def delete_document(filename: str):
+    existing = await run_in_threadpool(vector_store.get, where={"source": filename})
+    if not existing["ids"]:
+        raise HTTPException(status_code=404, detail=f"No indexed chunks found for '{filename}'")
+
+    await run_in_threadpool(vector_store.delete, ids=existing["ids"])
+
+    return {
+        "filename": filename,
+        "chunks_removed": len(existing["ids"]),
+        "detail": "Document removed from the index.",
     }
 
 class ChatMessage(BaseModel):
@@ -137,14 +170,17 @@ async def query_rag_advanced(request: AdvancedQueryRequest):
             ("human", "{input}"),
         ])
         context_chain = contextualize_q_prompt | llm
-        search_query = context_chain.invoke({"chat_history": chat_history, "input": request.question}).content
+        response = await run_in_threadpool(
+            context_chain.invoke, {"chat_history": chat_history, "input": request.question}
+        )
+        search_query = response.content
 
     # 3. Retrieve Candidate Pool (k=10 for broad recall)
     retriever = vector_store.as_retriever(search_kwargs={"k": 10})
-    candidate_docs = retriever.invoke(search_query)
+    candidate_docs = await run_in_threadpool(retriever.invoke, search_query)
 
     # 4. Rerank down to top k=3 high-precision chunks
-    top_docs = rerank_documents(search_query, candidate_docs, top_n=3)
+    top_docs = await run_in_threadpool(rerank_documents, search_query, candidate_docs, top_n=3)
     
     sources = list(set([doc.metadata.get("source", "Unknown") for doc in top_docs]))
     context_text = "\n\n".join([doc.page_content for doc in top_docs])
