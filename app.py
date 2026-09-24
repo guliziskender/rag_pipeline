@@ -88,6 +88,38 @@ async def ingest_document(file: UploadFile = File(...)):
         "detail": "PDF indexed successfully.",
     }
 
+
+@app.get("/documents", summary="List indexed documents")
+async def list_documents():
+    records = await run_in_threadpool(vector_store.get, include=["metadatas"])
+
+    chunk_counts: dict[str, int] = {}
+    for metadata in records["metadatas"]:
+        source = metadata.get("source", "Unknown")
+        chunk_counts[source] = chunk_counts.get(source, 0) + 1
+
+    return {
+        "documents": [
+            {"filename": source, "chunks": count}
+            for source, count in sorted(chunk_counts.items())
+        ]
+    }
+
+
+@app.delete("/documents/{filename}", summary="Remove an indexed document")
+async def delete_document(filename: str):
+    existing = await run_in_threadpool(vector_store.get, where={"source": filename})
+    if not existing["ids"]:
+        raise HTTPException(status_code=404, detail=f"No indexed chunks found for '{filename}'")
+
+    await run_in_threadpool(vector_store.delete, ids=existing["ids"])
+
+    return {
+        "filename": filename,
+        "chunks_removed": len(existing["ids"]),
+        "detail": "Document removed from the index.",
+    }
+
 class ChatMessage(BaseModel):
     role: str  # "user" or "assistant"
     content: str
