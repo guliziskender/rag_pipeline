@@ -8,10 +8,12 @@ pydantic
 langchain-core
 langchain-text-splitters
 langchain-community
+langchain-classic
 langchain-anthropic
 langchain-huggingface
 langchain-chroma
 
+rank_bm25
 pypdf
 sentence-transformers<5
 transformers<5

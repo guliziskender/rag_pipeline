@@ -11,7 +11,10 @@ from pydantic import BaseModel
 from langchain_anthropic import ChatAnthropic
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
+from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.retrievers import BM25Retriever
+from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 try:
@@ -39,6 +42,29 @@ vector_store = Chroma(
 llm = ChatAnthropic(model="claude-sonnet-5")
 
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+
+# BM25Retriever has no persistent index of its own -- it's an in-memory word
+# frequency table built from a fixed list of Documents -- so it must be
+# rebuilt from whatever's currently in Chroma whenever documents change.
+bm25_retriever: Optional[BM25Retriever] = None
+
+
+def rebuild_bm25_retriever() -> None:
+    global bm25_retriever
+    records = vector_store.get(include=["metadatas", "documents"])
+    docs = [
+        Document(page_content=text, metadata=metadata)
+        for text, metadata in zip(records["documents"], records["metadatas"])
+    ]
+    if not docs:
+        bm25_retriever = None
+        return
+    new_retriever = BM25Retriever.from_documents(docs)
+    new_retriever.k = 10
+    bm25_retriever = new_retriever
+
+
+rebuild_bm25_retriever()
 
 
 @app.post("/ingest", summary="Index an uploaded PDF")
@@ -82,6 +108,8 @@ async def ingest_document(file: UploadFile = File(...)):
             detail=f"Failed to index '{file.filename}': {exc}",
         ) from exc
 
+    await run_in_threadpool(rebuild_bm25_retriever)
+
     return {
         "filename": file.filename,
         "chunks": len(chunks),
@@ -113,6 +141,7 @@ async def delete_document(filename: str):
         raise HTTPException(status_code=404, detail=f"No indexed chunks found for '{filename}'")
 
     await run_in_threadpool(vector_store.delete, ids=existing["ids"])
+    await run_in_threadpool(rebuild_bm25_retriever)
 
     return {
         "filename": filename,
@@ -188,8 +217,17 @@ async def query_rag_advanced(request: AdvancedQueryRequest):
         )
         search_query = response.content
 
-    # 3. Retrieve Candidate Pool (k=10 for broad recall)
-    retriever = vector_store.as_retriever(search_kwargs={"k": 10})
+    # 3. Retrieve Candidate Pool (k=10 for broad recall), blending dense
+    # (semantic) search with BM25 (exact keyword/term) search so queries
+    # that hinge on specific names or jargon aren't missed by embeddings
+    # alone. Falls back to dense-only if BM25 has no documents yet.
+    dense_retriever = vector_store.as_retriever(search_kwargs={"k": 10})
+    if bm25_retriever is not None:
+        retriever = EnsembleRetriever(
+            retrievers=[dense_retriever, bm25_retriever], weights=[0.5, 0.5]
+        )
+    else:
+        retriever = dense_retriever
     candidate_docs = await run_in_threadpool(retriever.invoke, search_query)
 
     # 4. Rerank down to top k=3 high-precision chunks
