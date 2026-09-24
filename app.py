@@ -143,8 +143,21 @@ def rerank_documents(query: str, docs: list, top_n: int = 3):
     sorted_docs = sorted(docs, key=lambda x: x.metadata["rerank_score"], reverse=True)
     return sorted_docs[:top_n]
 
+def no_documents_response(search_query: str) -> StreamingResponse:
+    def no_context_stream():
+        yield f"METADATA:{json.dumps({'sources': [], 'standalone_query': search_query})}\n"
+        yield "I don't have any indexed documents to answer that from. Upload a PDF first."
+    return StreamingResponse(no_context_stream(), media_type="text/plain")
+
+
 @app.post("/query/advanced", summary="Advanced RAG with Memory & Reranking")
 async def query_rag_advanced(request: AdvancedQueryRequest):
+    # 0. Bail out before paying for a contextualization LLM call that
+    # retrieval could never use anyway if nothing has ever been indexed.
+    indexed_count = await run_in_threadpool(vector_store._collection.count)
+    if indexed_count == 0:
+        return no_documents_response(request.question)
+
     # 1. Reformat chat history for LangChain
     chat_history = []
     for msg in request.history:
@@ -183,10 +196,9 @@ async def query_rag_advanced(request: AdvancedQueryRequest):
     top_docs = await run_in_threadpool(rerank_documents, search_query, candidate_docs, top_n=3)
 
     if not top_docs:
-        def no_context_stream():
-            yield f"METADATA:{json.dumps({'sources': [], 'standalone_query': search_query})}\n"
-            yield "I don't have any indexed documents to answer that from. Upload a PDF first."
-        return StreamingResponse(no_context_stream(), media_type="text/plain")
+        # Defensive fallback: a concurrent DELETE /documents/{filename} could
+        # remove the last indexed chunk between the count check above and here.
+        return no_documents_response(search_query)
 
     sources = list(set([doc.metadata.get("source", "Unknown") for doc in top_docs]))
     context_text = "\n\n".join([doc.page_content for doc in top_docs])
