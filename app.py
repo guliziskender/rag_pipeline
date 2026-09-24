@@ -181,16 +181,35 @@ async def query_rag_advanced(request: AdvancedQueryRequest):
 
     # 4. Rerank down to top k=3 high-precision chunks
     top_docs = await run_in_threadpool(rerank_documents, search_query, candidate_docs, top_n=3)
-    
+
+    if not top_docs:
+        def no_context_stream():
+            yield f"METADATA:{json.dumps({'sources': [], 'standalone_query': search_query})}\n"
+            yield "I don't have any indexed documents to answer that from. Upload a PDF first."
+        return StreamingResponse(no_context_stream(), media_type="text/plain")
+
     sources = list(set([doc.metadata.get("source", "Unknown") for doc in top_docs]))
     context_text = "\n\n".join([doc.page_content for doc in top_docs])
 
+    # Cross-encoder logits for this model are roughly centered on 0: positive
+    # scores tend to be genuine matches, negative scores are the retriever's
+    # "least bad" guess rather than an actual answer to the question.
+    best_score = top_docs[0].metadata.get("rerank_score")
+    low_confidence = best_score is not None and best_score < 0.0
+
     # 5. Generation Step
-    qa_system_prompt = (
-        "You are an expert technical assistant. Use the retrieved context to answer "
-        "the user's question. If you don't know the answer, state that you don't know.\n\n"
-        f"Context:\n{context_text}"
+    grounding_instruction = (
+        "You are an expert technical assistant. Only answer using the Context "
+        "below. If the Context does not contain the answer, say the indexed "
+        "documents don't cover this — do not use your own general knowledge."
     )
+    if low_confidence:
+        grounding_instruction += (
+            " The retrieval system flagged this Context as a weak match for the "
+            "question, so treat it with extra skepticism before relying on it."
+        )
+
+    qa_system_prompt = f"{grounding_instruction}\n\nContext:\n{context_text}"
     
     qa_prompt = ChatPromptTemplate.from_messages([
         ("system", qa_system_prompt),
