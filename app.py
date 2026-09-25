@@ -234,41 +234,53 @@ async def query_rag_advanced(request: Request, query_request: AdvancedQueryReque
 
     search_query = query_request.question
 
-    # 2. History Contextualization Step
-    if chat_history:
-        contextualize_q_system_prompt = (
-            "Given a chat history and the latest user question "
-            "which might reference context in the chat history, "
-            "formulate a standalone question which can be understood "
-            "without the chat history. Do NOT answer the question, "
-            "just reformulate it if needed and otherwise return it as is."
-        )
-        contextualize_q_prompt = ChatPromptTemplate.from_messages([
-            ("system", contextualize_q_system_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ])
-        context_chain = contextualize_q_prompt | llm
-        response = await run_in_threadpool(
-            context_chain.invoke, {"chat_history": chat_history, "input": query_request.question}
-        )
-        search_query = response.content
+    try:
+        # 2. History Contextualization Step
+        if chat_history:
+            contextualize_q_system_prompt = (
+                "Given a chat history and the latest user question "
+                "which might reference context in the chat history, "
+                "formulate a standalone question which can be understood "
+                "without the chat history. Do NOT answer the question, "
+                "just reformulate it if needed and otherwise return it as is."
+            )
+            contextualize_q_prompt = ChatPromptTemplate.from_messages([
+                ("system", contextualize_q_system_prompt),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}"),
+            ])
+            context_chain = contextualize_q_prompt | llm
+            response = await run_in_threadpool(
+                context_chain.invoke, {"chat_history": chat_history, "input": query_request.question}
+            )
+            # .content isn't guaranteed to be a plain string -- some Claude
+            # responses come back as a list of structured content blocks (e.g.
+            # a thinking block alongside a text block). .text normalizes both
+            # shapes into a flat string; feeding a list into retrieval crashes
+            # deep inside the embedding call with an unhelpful AttributeError.
+            search_query = response.text
 
-    # 3. Retrieve Candidate Pool (k=10 for broad recall), blending dense
-    # (semantic) search with BM25 (exact keyword/term) search so queries
-    # that hinge on specific names or jargon aren't missed by embeddings
-    # alone. Falls back to dense-only if BM25 has no documents yet.
-    dense_retriever = vector_store.as_retriever(search_kwargs={"k": 10})
-    if bm25_retriever is not None:
-        retriever = EnsembleRetriever(
-            retrievers=[dense_retriever, bm25_retriever], weights=[0.5, 0.5]
-        )
-    else:
-        retriever = dense_retriever
-    candidate_docs = await run_in_threadpool(retriever.invoke, search_query)
+        # 3. Retrieve Candidate Pool (k=10 for broad recall), blending dense
+        # (semantic) search with BM25 (exact keyword/term) search so queries
+        # that hinge on specific names or jargon aren't missed by embeddings
+        # alone. Falls back to dense-only if BM25 has no documents yet.
+        dense_retriever = vector_store.as_retriever(search_kwargs={"k": 10})
+        if bm25_retriever is not None:
+            retriever = EnsembleRetriever(
+                retrievers=[dense_retriever, bm25_retriever], weights=[0.5, 0.5]
+            )
+        else:
+            retriever = dense_retriever
+        candidate_docs = await run_in_threadpool(retriever.invoke, search_query)
 
-    # 4. Rerank down to top k=3 high-precision chunks
-    top_docs = await run_in_threadpool(rerank_documents, search_query, candidate_docs, top_n=3)
+        # 4. Rerank down to top k=3 high-precision chunks
+        top_docs = await run_in_threadpool(rerank_documents, search_query, candidate_docs, top_n=3)
+    except Exception as exc:
+        logger.exception("Failed to retrieve context for question: %s", query_request.question)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve context for this question: {exc}",
+        ) from exc
 
     if not top_docs:
         # Defensive fallback: a concurrent DELETE /documents/{filename} could
@@ -308,8 +320,16 @@ async def query_rag_advanced(request: Request, query_request: AdvancedQueryReque
 
     def generate_tokens():
         yield f"METADATA:{json.dumps({'sources': sources, 'standalone_query': search_query})}\n"
-        for chunk in gen_chain.stream({"chat_history": chat_history, "input": query_request.question}):
-            if chunk.content:
-                yield chunk.content
+        # By this point the 200 status and headers are already committed, so
+        # a failure here can't become a clean HTTP error response -- the best
+        # we can do is log it and surface something in the stream body
+        # instead of just cutting the connection with no explanation.
+        try:
+            for chunk in gen_chain.stream({"chat_history": chat_history, "input": query_request.question}):
+                if chunk.text:
+                    yield chunk.text
+        except Exception:
+            logger.exception("Failed while streaming the answer for question: %s", query_request.question)
+            yield "\n\n[Error: failed to generate a complete answer. Please try again.]"
 
     return StreamingResponse(generate_tokens(), media_type="text/plain")

@@ -1,3 +1,8 @@
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+
+
 class FakeReranker:
     """Cross-encoder stand-in that returns a fixed score for every pair,
     so tests can force the low-confidence guardrail branch on demand."""
@@ -7,6 +12,26 @@ class FakeReranker:
 
     def predict(self, pairs):
         return [self.score for _ in pairs]
+
+
+class BlockContentChatModel(FakeListChatModel):
+    """Simulates a real Claude response whose .content is a list of
+    structured content blocks (e.g. a thinking block alongside a text
+    block) instead of a plain string. This is exactly what triggered a
+    real production bug: app.py used to read response.content directly and
+    feed it straight into retrieval, which crashed deep inside the
+    embedding call with `AttributeError: 'list' object has no attribute
+    'replace'` the moment a response came back block-structured instead of
+    as a flat string."""
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        message = AIMessage(content=[{"type": "text", "text": "standalone question"}])
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(content=[{"type": "text", "text": "generated answer"}])
+        )
 
 
 def test_empty_index_returns_canned_message_without_llm_call(client, app_module):
@@ -104,3 +129,27 @@ def test_hybrid_retrieval_finds_exact_keyword_match(
     )
     assert response.status_code == 200
     assert "zephyrion.pdf" in response.text
+
+
+def test_block_structured_llm_content_does_not_break_retrieval_or_streaming(
+    client, app_module, sample_pdf_bytes
+):
+    client.post("/ingest", files={"file": ("a.pdf", sample_pdf_bytes, "application/pdf")})
+    app_module.llm = BlockContentChatModel(responses=["unused"])
+
+    # History triggers the contextualization call, whose block-structured
+    # response.text used to be fed straight into retrieval as response.content.
+    response = client.post(
+        "/query/advanced",
+        json={
+            "question": "what about it?",
+            "history": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert '"standalone_query": "standalone question"' in response.text
+    assert "generated answer" in response.text
