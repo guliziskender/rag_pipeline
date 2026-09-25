@@ -4,6 +4,7 @@ python-multipart
 streamlit
 requests
 pydantic
+python-dotenv
 
 langchain-core
 langchain-text-splitters

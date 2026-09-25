@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 APP_PATH = Path(__file__).resolve().parent.parent / "app.py"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+TEST_API_KEY = "test-api-key"
 
 
 @pytest.fixture
@@ -65,6 +66,7 @@ def app_module(tmp_path, monkeypatch):
     # that don't specifically exercise reranking/guardrail scoring.
     monkeypatch.setattr(sentence_transformers, "CrossEncoder", None)
     monkeypatch.setenv("CHROMA_PERSIST_DIR", str(tmp_path / "chroma_db"))
+    monkeypatch.setenv("RAG_API_KEY", TEST_API_KEY)
 
     module_name = f"app_under_test_{uuid.uuid4().hex}"
     spec = importlib.util.spec_from_file_location(module_name, APP_PATH)
@@ -80,6 +82,13 @@ def app_module(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client(app_module):
+    """An authenticated client -- the vast majority of tests care about
+    application behavior, not auth, so this is the default everywhere."""
+    return TestClient(app_module.app, headers={"X-API-Key": TEST_API_KEY})
+
+
+@pytest.fixture
+def unauthenticated_client(app_module):
     return TestClient(app_module.app)
 
 

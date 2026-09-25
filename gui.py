@@ -1,10 +1,16 @@
 import json
+import os
 from urllib.parse import quote
 
 import requests
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
 
 API_URL = "http://localhost:8000"
+API_KEY = os.environ.get("RAG_API_KEY")
+HEADERS = {"X-API-Key": API_KEY} if API_KEY else {}
 
 st.set_page_config(
     page_title="Enterprise RAG Assistant (Advanced)",
@@ -12,6 +18,13 @@ st.set_page_config(
     layout="wide"
 )
 st.title("🤖 Enterprise RAG Assistant")
+
+if not API_KEY:
+    st.error(
+        "RAG_API_KEY is not set. Set it in a .env file or your environment "
+        "(it must match the backend's RAG_API_KEY) before using this app."
+    )
+    st.stop()
 
 # Sidebar: Document Ingestion Portal
 with st.sidebar:
@@ -22,7 +35,7 @@ with st.sidebar:
         with st.spinner("Processing & indexing PDF..."):
             files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
             try:
-                response = requests.post(f"{API_URL}/ingest", files=files)
+                response = requests.post(f"{API_URL}/ingest", files=files, headers=HEADERS)
                 if response.status_code == 200:
                     data = response.json()
                     st.success(f"Indexed **{uploaded_file.name}** ({data.get('chunks')} chunks).")
@@ -35,7 +48,7 @@ with st.sidebar:
     st.header("🗂️ Indexed Documents")
 
     try:
-        docs_response = requests.get(f"{API_URL}/documents")
+        docs_response = requests.get(f"{API_URL}/documents", headers=HEADERS)
         documents = docs_response.json().get("documents", []) if docs_response.status_code == 200 else []
     except Exception as e:
         documents = []
@@ -50,7 +63,9 @@ with st.sidebar:
             if col2.button("🗑️", key=f"delete_{doc['filename']}", help=f"Remove {doc['filename']}"):
                 with st.spinner(f"Removing {doc['filename']}..."):
                     try:
-                        del_response = requests.delete(f"{API_URL}/documents/{quote(doc['filename'], safe='')}")
+                        del_response = requests.delete(
+                            f"{API_URL}/documents/{quote(doc['filename'], safe='')}", headers=HEADERS
+                        )
                         if del_response.status_code == 200:
                             st.success(f"Removed **{doc['filename']}**.")
                             st.rerun()
@@ -94,6 +109,7 @@ if prompt := st.chat_input("Ask a question based on your uploaded PDFs..."):
             res = requests.post(
                 f"{API_URL}/query/advanced",
                 json=payload,
+                headers=HEADERS,
                 stream=True
             )
 

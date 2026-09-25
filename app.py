@@ -1,12 +1,17 @@
 import json
 import logging
 import os
+import secrets
 import tempfile
 from typing import List, Optional
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, File, UploadFile, HTTPException, Security
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
+from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
+
+load_dotenv()
 
 from langchain_anthropic import ChatAnthropic
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -25,7 +30,23 @@ except ImportError:
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-app = FastAPI()
+API_KEY = os.environ.get("RAG_API_KEY")
+if not API_KEY:
+    raise RuntimeError(
+        "RAG_API_KEY environment variable must be set to a shared secret "
+        "before starting the server. Generate one with, e.g.:\n"
+        '  python -c "import secrets; print(secrets.token_urlsafe(32))"'
+    )
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(provided_key: str = Security(api_key_header)) -> None:
+    if not provided_key or not secrets.compare_digest(provided_key, API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+app = FastAPI(dependencies=[Depends(verify_api_key)])
 logger = logging.getLogger("rag_pipeline")
 
 PERSIST_DIRECTORY = os.environ.get("CHROMA_PERSIST_DIR", "./chroma_db")
