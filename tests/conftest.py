@@ -93,6 +93,11 @@ def unauthenticated_client(app_module):
 
 
 @pytest.fixture
+def test_api_key():
+    return TEST_API_KEY
+
+
+@pytest.fixture
 def sample_pdf_bytes():
     return (FIXTURES_DIR / "sample_a.pdf").read_bytes()
 

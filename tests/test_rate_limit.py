@@ -42,16 +42,14 @@ def test_documents_falls_back_to_default_limit(client):
     assert sixty_first.status_code == 429
 
 
-def test_rate_limit_is_per_client_not_global(app_module, sample_pdf_bytes):
+def test_rate_limit_is_per_client_not_global(app_module, sample_pdf_bytes, test_api_key):
     from fastapi.testclient import TestClient
 
-    from tests.conftest import TEST_API_KEY
-
     client_a = TestClient(
-        app_module.app, headers={"X-API-Key": TEST_API_KEY}, client=("1.1.1.1", 123)
+        app_module.app, headers={"X-API-Key": test_api_key}, client=("1.1.1.1", 123)
     )
     client_b = TestClient(
-        app_module.app, headers={"X-API-Key": TEST_API_KEY}, client=("2.2.2.2", 123)
+        app_module.app, headers={"X-API-Key": test_api_key}, client=("2.2.2.2", 123)
     )
 
     for i in range(10):
