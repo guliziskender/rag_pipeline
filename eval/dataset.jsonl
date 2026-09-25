@@ -1,0 +1,5 @@
+{"question": "What is the rated output of the Zephyrion-9000?", "expected_source": "sample_b.pdf"}
+{"question": "How often does the Zephyrion-9000 need maintenance?", "expected_source": "sample_b.pdf"}
+{"question": "What converts sunlight into chemical energy in plants?", "expected_source": "sample_a.pdf"}
+{"question": "What absorbs light in the thylakoid membrane?", "expected_source": "sample_a.pdf"}
+{"question": "What is the capital of France?", "expected_source": null}
