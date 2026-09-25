@@ -49,6 +49,9 @@ chroma_db/
 uploads/
 data/
 
+# Generated eval run output
+eval/results/
+
 # Jupyter
 .ipynb_checkpoints/
 
