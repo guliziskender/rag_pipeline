@@ -5,6 +5,7 @@ streamlit
 requests
 pydantic
 python-dotenv
+slowapi
 
 langchain-core
 langchain-text-splitters

@@ -5,11 +5,15 @@ import secrets
 import tempfile
 from typing import List, Optional
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, UploadFile, HTTPException, Security
+from fastapi import Depends, FastAPI, File, Request, UploadFile, HTTPException, Security
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 load_dotenv()
 
@@ -48,6 +52,16 @@ async def verify_api_key(provided_key: str = Security(api_key_header)) -> None:
 
 app = FastAPI(dependencies=[Depends(verify_api_key)])
 logger = logging.getLogger("rag_pipeline")
+
+# Everyone authenticates with the same shared RAG_API_KEY, so there's no
+# per-user identity to key rate limits on -- limit per client IP instead.
+# This guards against the realistic failure mode (a script looping and
+# racking up Anthropic API cost), not against an outside attacker guessing
+# the key, which a shared secret can't defend against anyway.
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 PERSIST_DIRECTORY = os.environ.get("CHROMA_PERSIST_DIR", "./chroma_db")
 
@@ -89,7 +103,8 @@ rebuild_bm25_retriever()
 
 
 @app.post("/ingest", summary="Index an uploaded PDF")
-async def ingest_document(file: UploadFile = File(...)):
+@limiter.limit("10/minute")
+async def ingest_document(request: Request, file: UploadFile = File(...)):
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=415, detail="Only PDF files are supported")
 
@@ -201,22 +216,23 @@ def no_documents_response(search_query: str) -> StreamingResponse:
 
 
 @app.post("/query/advanced", summary="Advanced RAG with Memory & Reranking")
-async def query_rag_advanced(request: AdvancedQueryRequest):
+@limiter.limit("20/minute")
+async def query_rag_advanced(request: Request, query_request: AdvancedQueryRequest):
     # 0. Bail out before paying for a contextualization LLM call that
     # retrieval could never use anyway if nothing has ever been indexed.
     indexed_count = await run_in_threadpool(vector_store._collection.count)
     if indexed_count == 0:
-        return no_documents_response(request.question)
+        return no_documents_response(query_request.question)
 
     # 1. Reformat chat history for LangChain
     chat_history = []
-    for msg in request.history:
+    for msg in query_request.history:
         if msg.role == "user":
             chat_history.append(HumanMessage(content=msg.content))
         elif msg.role == "assistant":
             chat_history.append(AIMessage(content=msg.content))
 
-    search_query = request.question
+    search_query = query_request.question
 
     # 2. History Contextualization Step
     if chat_history:
@@ -234,7 +250,7 @@ async def query_rag_advanced(request: AdvancedQueryRequest):
         ])
         context_chain = contextualize_q_prompt | llm
         response = await run_in_threadpool(
-            context_chain.invoke, {"chat_history": chat_history, "input": request.question}
+            context_chain.invoke, {"chat_history": chat_history, "input": query_request.question}
         )
         search_query = response.content
 
@@ -292,7 +308,7 @@ async def query_rag_advanced(request: AdvancedQueryRequest):
 
     def generate_tokens():
         yield f"METADATA:{json.dumps({'sources': sources, 'standalone_query': search_query})}\n"
-        for chunk in gen_chain.stream({"chat_history": chat_history, "input": request.question}):
+        for chunk in gen_chain.stream({"chat_history": chat_history, "input": query_request.question}):
             if chunk.content:
                 yield chunk.content
 
