@@ -22,3 +22,4 @@ transformers<5
 chromadb
 numpy<2
 scipy<1.14
+pyarrow<23  # newer pyarrow needs NumPy 2 (conflicts with numpy<2); streamlit imports it
